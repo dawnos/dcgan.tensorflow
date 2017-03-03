@@ -2,7 +2,9 @@ import argparse
 import sys
 
 import tensorflow as tf
+from tensorflow.python import debug as tf_debug
 from tensorflow.contrib import layers
+
 from celeba import create_celeba_pipeline
 
 
@@ -16,7 +18,7 @@ def lrelu(x, alpha=0.2, name="lrelu"):
     return tf.maximum(x, alpha * x, name=name)
 
 
-def generator(input_tensor, name='Generator', reuse=False):
+def generator(input_tensor, name='generator', reuse=False):
     with tf.variable_scope(name, reuse=reuse):
         net = layers.stack(input_tensor, layers.conv2d_transpose, [
             [ngf*8, [4, 4], 2, 'VALID', 'NHWC', tf.nn.relu],
@@ -28,7 +30,7 @@ def generator(input_tensor, name='Generator', reuse=False):
     return net
 
 
-def discriminator(input_tensor, name='Discriminator', reuse=False):
+def discriminator(input_tensor, name='discriminator', reuse=False):
     with tf.variable_scope(name, reuse=reuse):
         net = layers.stack(input_tensor, layers.conv2d, [
             [ndf*1, [4, 4], 2, 'SAME', None, 1, lrelu],
@@ -40,55 +42,99 @@ def discriminator(input_tensor, name='Discriminator', reuse=False):
     return net
 
 
-def binary_cross_entropy(op1, op2, name='BinaryCrossEntropy'):
+def binary_cross_entropy(op1, op2, name='binary_cross_entropy'):
     with tf.variable_scope(name):
         return tf.reduce_mean(op1 * tf.log(op2) + (1-op1)*tf.log(1-op2))
+
+
+def to_rgb(op, name='to_rgb'):
+    with tf.variable_scope(name):
+        rgb = tf.cast((op+1)*127.5, tf.uint8)
+        return rgb
 
 
 def main(_):
 
     batch_size = 64
+    epoches = 25
+    data_count = 202613
 
-    noise = tf.random_uniform((batch_size, 1, 1, nc), -1, 1, name='Noise')
-    pos_labels = tf.constant(1, shape=(batch_size, 1, 1, 1), dtype=tf.float32, name='Ones')
-    neg_labels = tf.constant(0, shape=(batch_size, 1, 1, 1), dtype=tf.float32, name='Zeros')
-    real_images = create_celeba_pipeline('/mnt/DataBlock/CelebA/Img/img_align_celeba.tfrecords', name='ImagePipeline')
-    state = tf.placeholder(tf.int32, name='State')
+    noise = tf.random_uniform((batch_size, 1, 1, nc), -1, 1, name='noise')
+    pos_labels = tf.constant(1, shape=(batch_size, 1, 1, 1), dtype=tf.float32, name='ones')
+    neg_labels = tf.constant(0, shape=(batch_size, 1, 1, 1), dtype=tf.float32, name='zeros')
+    real_images, tmp = create_celeba_pipeline('/mnt/DataBlock/CelebA/Img/img_align_celeba.tfrecords', name='image_pipeline')
+    state = tf.placeholder(tf.int32, name='state')
 
-    g_op = generator(noise, name='Generator')
+    g_op = generator(noise, name='generator')
     d_input_op = tf.cond(
-        tf.equal(state, tf.constant(0), 'State0'), lambda: real_images, lambda: g_op, name='DiscriminatorInputSwitch')
-    d_op = discriminator(d_input_op, name='Discriminator')
-    label_op = tf.cond(tf.equal(state, tf.constant(1), 'State1'), lambda: neg_labels, lambda: pos_labels, name='Label')
+        tf.equal(state, tf.constant(0), 'STATE0'), lambda: real_images, lambda: g_op, name='discriminator_input_switch')
+    d_op = discriminator(d_input_op, name='discriminator')
+    label_op = tf.cond(tf.equal(state, tf.constant(1), 'STATE1'), lambda: neg_labels, lambda: pos_labels, name='label')
     loss = binary_cross_entropy(d_op, label_op, name='loss')
 
-    gen_var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Generator')
-    dis_var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Discriminator')
+    gen_var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='generator')
+    dis_var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='discriminator')
 
-    g_update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, 'Generator')
-    d_update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, 'Discriminator')
+    # g_update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, 'generator')
+    # d_update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, 'discriminator')
 
-    with tf.control_dependencies(g_update_ops):
-        g_train_op = tf.train.AdamOptimizer(0.0002, 0.5).minimize(loss, var_list=gen_var, name='GTrain')
+    # with tf.control_dependencies(g_update_ops):
+    g_train_op = tf.train.AdamOptimizer(0.0002, 0.5).minimize(loss, var_list=gen_var, name='g_train')
 
-    with tf.control_dependencies(d_update_ops):
-        d_train_op = tf.train.AdamOptimizer(0.0002, 0.5).minimize(loss, var_list=dis_var, name='DTrain')
+    # with tf.control_dependencies(d_update_ops):
+    d_train_op = tf.train.AdamOptimizer(0.0002, 0.5).minimize(loss, var_list=dis_var, name='d_train')
+
+    # Summaries
+    generated_image_summary_op = tf.summary.image('generated_image', to_rgb(g_op))
+    real_image_summary_op = tf.summary.image('real_image', to_rgb(real_images))
+    g_loss_summary_op = tf.summary.scalar('g_loss', loss)
+    d_loss_summary_op = tf.summary.scalar('d_loss', loss)
+    g_merged_summaries = tf.summary.merge([generated_image_summary_op, real_image_summary_op, g_loss_summary_op])
+    d_merged_summaries = tf.summary.merge([generated_image_summary_op, real_image_summary_op, d_loss_summary_op])
+    # g_train_op = [g_train_op, g_merged_summaries]
+    # d_train_op = [d_train_op, d_merged_summaries]
 
     with tf.Session() as sess:
 
+        tf.train.start_queue_runners()
+
+        if FLAGS.debug:
+            sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+
         # Save the graph
         writer = tf.summary.FileWriter(logdir=FLAGS.log_dir, graph=tf.get_default_graph())
+        print 'graph written'
 
-        exit()
-        # 1. Training discriminator
-        # 1.1 Train with real(feed:image, update_variable:discriminator)    --> step 0
-        sess.run(d_train_op, feed_dict={state:0})
+        # exit()
+        tf.global_variables_initializer().run()
+        print 'global variables initialized'
 
-        # 1.2 Train with fake(feed:noise, update_variable:discriminator)    --> step 1
-        sess.run(d_train_op, feed_dict={state:1})
+        # Main
+        epoch = 0.0
+        global_step = 0
+        while epoch < epoches:
+            epoch += batch_size / data_count
+            global_step += 1
 
-        # 2. Training generator(feed:noise, update_variable:generator)      -->step 2
-        sess.run(g_train_op, feed_dict={state:2})
+            # 1. Training discriminator
+            # 1.1 Train with real(feed:image, update_variable:discriminator)    --> state 0
+            _, summary = sess.run([d_train_op, d_merged_summaries], feed_dict={state: 0})
+            # ans = sess.run(tmp, feed_dict={state: 0})
+            # print ans
+            print 'step 0'
+            writer.add_summary(summary, global_step)
+
+            # 1.2 Train with fake(feed:noise, update_variable:discriminator)    --> state 1
+            _, summary = sess.run([d_train_op, d_merged_summaries], feed_dict={state: 1})
+            print 'step 1'
+            writer.add_summary(summary, global_step)
+
+            # 2. Training generator(feed:noise, update_variable:generator)      -->state 2
+            _, summary = sess.run([g_train_op, g_merged_summaries], feed_dict={state: 2})
+            print 'step 2'
+            writer.add_summary(summary, global_step)
+
+            print 'Epoch:' + str(epoch) + '/' + str(epoches)
 
 
 if __name__ == '__main__':
@@ -105,6 +151,8 @@ if __name__ == '__main__':
 
     parser.add_argument('--log_dir', type=str, default='/tmp/tensorflow/dcgan/log',
                         help='Log directory')
+    parser.add_argument("--debug", type=bool, default=False,
+                        help="Use debugger to track down bad values during training")
 
     FLAGS, unparsed = parser.parse_known_args()
     tf.app.run(main=main, argv=[sys.argv[0]] + unparsed)
