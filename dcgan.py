@@ -1,11 +1,12 @@
 import argparse
 import sys
+import warnings
 
 import tensorflow as tf
 from tensorflow.python import debug as tf_debug
 from tensorflow.contrib import layers
 
-from celeba import create_celeba_pipeline
+import celeba
 
 
 nz = 100
@@ -62,12 +63,24 @@ def main(_):
     noise = tf.random_uniform((batch_size, 1, 1, nc), -1, 1, name='noise')
     pos_labels = tf.constant(1, shape=(batch_size, 1, 1, 1), dtype=tf.float32, name='ones')
     neg_labels = tf.constant(0, shape=(batch_size, 1, 1, 1), dtype=tf.float32, name='zeros')
-    real_images, tmp = create_celeba_pipeline('/mnt/DataBlock/CelebA/Img/img_align_celeba.tfrecords', name='image_pipeline')
     state = tf.placeholder(tf.int32, name='state')
+    if FLAGS.raw_input:
+        print 'Using raw input'
+        real_images = tf.placeholder(tf.float32, shape=(batch_size, 64, 64, 3))
+        reader = celeba.Reader('/mnt/DataBlock/CelebA/Img/img_align_celeba')
+    else:
+        real_images = celeba.create_pipeline('/mnt/DataBlock/CelebA/Img/img_align_celeba.tfrecords', name='image_pipeline')
 
     g_op = generator(noise, name='generator')
-    d_input_op = tf.cond(
-        tf.equal(state, tf.constant(0), 'STATE0'), lambda: real_images, lambda: g_op, name='discriminator_input_switch')
+    d_input_op_1 = g_op
+    def fn1():
+        with tf.control_dependencies([tf.assign(d_input_op_1, real_images)]):
+            return tf.identity(d_input_op_1)
+    # def fn2():
+    #     with tf.control_dependencies([tf.assign(d_input_op, g_op)]):
+    #         return tf.identity(d_input_op)
+    d_input_op = tf.cond(tf.equal(state, tf.constant(0), 'STATE0'), fn1, lambda: tf.identity(d_input_op_1))
+                             # d_input_op = tf.cond(tf.equal(state, tf.constant(0), 'STATE0'), lambda: real_images, lambda: g_op, name='discriminator_input_switch')
     d_op = discriminator(d_input_op, name='discriminator')
     label_op = tf.cond(tf.equal(state, tf.constant(1), 'STATE1'), lambda: neg_labels, lambda: pos_labels, name='label')
     loss = binary_cross_entropy(d_op, label_op, name='loss')
@@ -91,37 +104,39 @@ def main(_):
     d_loss_summary_op = tf.summary.scalar('d_loss', loss)
     g_merged_summaries = tf.summary.merge([generated_image_summary_op, real_image_summary_op, g_loss_summary_op])
     d_merged_summaries = tf.summary.merge([generated_image_summary_op, real_image_summary_op, d_loss_summary_op])
-    # g_train_op = [g_train_op, g_merged_summaries]
-    # d_train_op = [d_train_op, d_merged_summaries]
 
     with tf.Session() as sess:
 
-        tf.train.start_queue_runners()
+        if not FLAGS.raw_input:
+            tf.train.start_queue_runners(sess)
+            print 'Queue runners started.'
 
         if FLAGS.debug:
+            print 'Entering debug mode...'
             sess = tf_debug.LocalCLIDebugWrapperSession(sess)
 
         # Save the graph
         writer = tf.summary.FileWriter(logdir=FLAGS.log_dir, graph=tf.get_default_graph())
-        print 'graph written'
+        print 'Graph written'
 
-        # exit()
-        tf.global_variables_initializer().run()
-        print 'global variables initialized'
+        tf.global_variables_initializer().run(session=sess)
+        print 'Variables initialized'
 
         # Main
         epoch = 0.0
         global_step = 0
         while epoch < epoches:
-            epoch += batch_size / data_count
+            epoch += float(batch_size) / data_count
             global_step += 1
 
             # 1. Training discriminator
             # 1.1 Train with real(feed:image, update_variable:discriminator)    --> state 0
-            _, summary = sess.run([d_train_op, d_merged_summaries], feed_dict={state: 0})
-            # ans = sess.run(tmp, feed_dict={state: 0})
-            # print ans
-            print 'step 0'
+            if FLAGS.raw_input:
+                _, summary, loss_val = sess.run(
+                    [d_train_op, d_merged_summaries, loss], feed_dict={state: 0, real_images:reader.next_batch()})
+            else:
+                _, summary, loss_val = sess.run([d_train_op, d_merged_summaries, loss], feed_dict={state: 0})
+            print 'step 0: loss=' + str(loss_val)
             writer.add_summary(summary, global_step)
 
             # 1.2 Train with fake(feed:noise, update_variable:discriminator)    --> state 1
@@ -136,12 +151,8 @@ def main(_):
 
             print 'Epoch:' + str(epoch) + '/' + str(epoches)
 
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--fake_data', nargs='?', const=True, type=bool,
-                        default=False,
-                        help='If true, uses fake data for unit testing.')
 
     parser.add_argument('--epoch', type=int, default=25,
                         help='Number of steps to run trainer.')
@@ -151,8 +162,17 @@ if __name__ == '__main__':
 
     parser.add_argument('--log_dir', type=str, default='/tmp/tensorflow/dcgan/log',
                         help='Log directory')
+
     parser.add_argument("--debug", type=bool, default=False,
                         help="Use debugger to track down bad values during training")
 
+    parser.add_argument("--raw_input", type=bool, default=False,
+                        help="If true, read data from separate images; otherwise from tfrecord")
+
     FLAGS, unparsed = parser.parse_known_args()
+
+    if FLAGS.debug and not FLAGS.raw_input:
+        warnings.warn('In debug mode only raw input are allowed. Changing to raw input.')
+        FLAGS.raw_input = True
+
     tf.app.run(main=main, argv=[sys.argv[0]] + unparsed)
