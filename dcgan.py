@@ -33,13 +33,22 @@ def generator(input_tensor, name='generator', reuse=False):
 
 def discriminator(input_tensor, name='discriminator', reuse=False):
     with tf.variable_scope(name, reuse=reuse):
+        '''
         net = layers.stack(input_tensor, layers.conv2d, [
             [ndf*1, [4, 4], 2, 'SAME', None, 1, lrelu],
             [ndf*2, [4, 4], 2, 'SAME', None, 1, lrelu],
             [ndf*4, [4, 4], 2, 'SAME', None, 1, lrelu],
             [ndf*8, [4, 4], 2, 'SAME', None, 1, lrelu],
-            [    1, [4, 4], 2, 'SAME', None, 1, tf.nn.sigmoid]
+            [    1, [4, 4], 2, 'VALID', None, 1, None]
         ], normalizer_fn=layers.batch_norm)
+        '''
+
+        net = layers.conv2d(input_tensor, ndf * 1, [4, 4], 2, 'SAME', activation_fn=lrelu)
+        net = layers.conv2d(net, ndf * 2, [4, 4], 2, 'SAME', activation_fn=lrelu, normalizer_fn=layers.batch_norm)
+        net = layers.conv2d(net, ndf * 4, [4, 4], 2, 'SAME', activation_fn=lrelu, normalizer_fn=layers.batch_norm)
+        net = layers.conv2d(net, ndf * 8, [4, 4], 2, 'SAME', activation_fn=lrelu, normalizer_fn=layers.batch_norm)
+        net = layers.conv2d(net, 1, [4, 4], 2, 'VALID', activation_fn=None)
+
     return net
 
 
@@ -56,7 +65,7 @@ def to_rgb(op, name='to_rgb'):
 
 def main(_):
 
-    batch_size = 64
+    batch_size = 128
     epoches = 25
     data_count = 202613
 
@@ -67,23 +76,31 @@ def main(_):
     if FLAGS.raw_input:
         print 'Using raw input'
         real_images = tf.placeholder(tf.float32, shape=(batch_size, 64, 64, 3))
-        reader = celeba.Reader('/mnt/DataBlock/CelebA/Img/img_align_celeba')
+        reader = celeba.Reader('/mnt/DataBlock/CelebA/Img/img_align_celeba', batch_size=batch_size)
     else:
-        real_images = celeba.create_pipeline('/mnt/DataBlock/CelebA/Img/img_align_celeba.tfrecords', name='image_pipeline')
+        real_images = celeba.create_pipeline('/mnt/DataBlock/CelebA/Img/img_align_celeba.tfrecords',
+                                             name='image_pipeline', batch_size=batch_size)
 
     g_op = generator(noise, name='generator')
-    d_input_op_1 = g_op
+
+    '''
+    d_input_op_1 = tf.get_variable('d_input_op_1', dtype=tf.float32, shape=(batch_size, 64, 64, 3))
     def fn1():
         with tf.control_dependencies([tf.assign(d_input_op_1, real_images)]):
             return tf.identity(d_input_op_1)
-    # def fn2():
-    #     with tf.control_dependencies([tf.assign(d_input_op, g_op)]):
-    #         return tf.identity(d_input_op)
+    def fn2():
+        with tf.control_dependencies([tf.assign(d_input_op, g_op)]):
+            return tf.identity(d_input_op)
     d_input_op = tf.cond(tf.equal(state, tf.constant(0), 'STATE0'), fn1, lambda: tf.identity(d_input_op_1))
-                             # d_input_op = tf.cond(tf.equal(state, tf.constant(0), 'STATE0'), lambda: real_images, lambda: g_op, name='discriminator_input_switch')
+    '''
+
+    d_input_op = tf.cond(tf.equal(state, tf.constant(0), 'STATE0'), lambda: real_images, lambda: g_op, name='discriminator_input_switch')
+
     d_op = discriminator(d_input_op, name='discriminator')
+    tf.summary.scalar('tmp', d_op)
     label_op = tf.cond(tf.equal(state, tf.constant(1), 'STATE1'), lambda: neg_labels, lambda: pos_labels, name='label')
-    loss = binary_cross_entropy(d_op, label_op, name='loss')
+    # loss = binary_cross_entropy(d_op, label_op, name='loss')
+    loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=d_op, labels=label_op), name='loss')
 
     gen_var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='generator')
     dis_var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='discriminator')
@@ -97,15 +114,25 @@ def main(_):
     # with tf.control_dependencies(d_update_ops):
     d_train_op = tf.train.AdamOptimizer(0.0002, 0.5).minimize(loss, var_list=dis_var, name='d_train')
 
+    # with tf.variable_scope('discriminator/Stack/convolution_5/BatchNorm', reuse=True):
+    #     bn = tf.get_variable('moving_mean')
+    # with tf.variable_scope('', reuse=True):
+    #     bn = tf.get_variable('loss')
+
     # Summaries
     generated_image_summary_op = tf.summary.image('generated_image', to_rgb(g_op))
     real_image_summary_op = tf.summary.image('real_image', to_rgb(real_images))
     g_loss_summary_op = tf.summary.scalar('g_loss', loss)
     d_loss_summary_op = tf.summary.scalar('d_loss', loss)
-    g_merged_summaries = tf.summary.merge([generated_image_summary_op, real_image_summary_op, g_loss_summary_op])
-    d_merged_summaries = tf.summary.merge([generated_image_summary_op, real_image_summary_op, d_loss_summary_op])
+    # bn_summary_op = tf.summary.scalar('bn11', bn)
+    g_merged_summaries = tf.summary.merge([generated_image_summary_op, g_loss_summary_op])
+    d_merged_summaries = tf.summary.merge([real_image_summary_op, d_loss_summary_op])
 
     with tf.Session() as sess:
+
+        # Save the graph
+        writer = tf.summary.FileWriter(logdir=FLAGS.log_dir, graph=tf.get_default_graph())
+        print 'Graph written'
 
         if not FLAGS.raw_input:
             tf.train.start_queue_runners(sess)
@@ -115,10 +142,6 @@ def main(_):
             print 'Entering debug mode...'
             sess = tf_debug.LocalCLIDebugWrapperSession(sess)
 
-        # Save the graph
-        writer = tf.summary.FileWriter(logdir=FLAGS.log_dir, graph=tf.get_default_graph())
-        print 'Graph written'
-
         tf.global_variables_initializer().run(session=sess)
         print 'Variables initialized'
 
@@ -126,30 +149,41 @@ def main(_):
         epoch = 0.0
         global_step = 0
         while epoch < epoches:
+
             epoch += float(batch_size) / data_count
             global_step += 1
 
             # 1. Training discriminator
             # 1.1 Train with real(feed:image, update_variable:discriminator)    --> state 0
             if FLAGS.raw_input:
-                _, summary, loss_val = sess.run(
-                    [d_train_op, d_merged_summaries, loss], feed_dict={state: 0, real_images:reader.next_batch()})
+                _, summary, loss_val = sess.run([d_train_op, d_merged_summaries, loss],
+                                                feed_dict={state: 0, real_images: reader.next_batch()})
             else:
                 _, summary, loss_val = sess.run([d_train_op, d_merged_summaries, loss], feed_dict={state: 0})
-            print 'step 0: loss=' + str(loss_val)
             writer.add_summary(summary, global_step)
+            print 'step 0: loss=' + str(loss_val)
+
+            global_step += 1
 
             # 1.2 Train with fake(feed:noise, update_variable:discriminator)    --> state 1
-            _, summary = sess.run([d_train_op, d_merged_summaries], feed_dict={state: 1})
-            print 'step 1'
+            if FLAGS.raw_input:
+                _, summary, loss_val = sess.run([d_train_op, d_merged_summaries, loss],
+                                                feed_dict={state: 0, real_images:reader.next_batch()})
+            else:
+                _, summary, loss_val = sess.run([d_train_op, d_merged_summaries, loss], feed_dict={state: 1})
             writer.add_summary(summary, global_step)
+            print 'step 1: loss=' + str(loss_val)
 
             # 2. Training generator(feed:noise, update_variable:generator)      -->state 2
-            _, summary = sess.run([g_train_op, g_merged_summaries], feed_dict={state: 2})
-            print 'step 2'
+            if FLAGS.raw_input:
+                _, summary, loss_val = sess.run([d_train_op, d_merged_summaries, loss],
+                                                feed_dict={state: 0, real_images:reader.next_batch()})
+            else:
+                _, summary, loss_val = sess.run([g_train_op, g_merged_summaries, loss], feed_dict={state: 2})
             writer.add_summary(summary, global_step)
+            print 'step 2: loss=' + str(loss_val)
 
-            print 'Epoch:' + str(epoch) + '/' + str(epoches)
+            print 'Epoch:%.2f/%d' % (epoch, epoches)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -158,7 +192,7 @@ if __name__ == '__main__':
                         help='Number of steps to run trainer.')
 
     parser.add_argument('--data_dir', type=str, default='/mnt/DataBlock/CelebA/Img',
-                        help='Directory for storing input data')
+                        help='Directory for storing input data or tfrecord file')
 
     parser.add_argument('--log_dir', type=str, default='/tmp/tensorflow/dcgan/log',
                         help='Log directory')
