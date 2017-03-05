@@ -22,32 +22,32 @@ def lrelu(x, alpha=0.2, name="lrelu"):
 def generator(input_tensor, name='generator', reuse=False):
     with tf.variable_scope(name, reuse=reuse):
         net = layers.stack(input_tensor, layers.conv2d_transpose, [
-            [ngf*8, [4, 4], 2, 'VALID', 'NHWC', tf.nn.relu],
-            [ngf*4, [4, 4], 2,  'SAME', 'NHWC', tf.nn.relu],
-            [ngf*2, [4, 4], 2,  'SAME', 'NHWC', tf.nn.relu],
-            [ngf*1, [4, 4], 2,  'SAME', 'NHWC', tf.nn.relu],
+            [ngf*8, [4, 4], 2, 'VALID', 'NHWC', tf.nn.relu, layers.batch_norm],
+            [ngf*4, [4, 4], 2,  'SAME', 'NHWC', tf.nn.relu, layers.batch_norm],
+            [ngf*2, [4, 4], 2,  'SAME', 'NHWC', tf.nn.relu, layers.batch_norm],
+            [ngf*1, [4, 4], 2,  'SAME', 'NHWC', tf.nn.relu, layers.batch_norm],
             [   nc, [4, 4], 2,  'SAME', 'NHWC', tf.nn.tanh]
-        ], normalizer_fn=layers.batch_norm)
+        ])
     return net
 
 
 def discriminator(input_tensor, name='discriminator', reuse=False):
+
     with tf.variable_scope(name, reuse=reuse):
         '''
-        net = layers.stack(input_tensor, layers.conv2d, [
-            [ndf*1, [4, 4], 2, 'SAME', None, 1, lrelu],
-            [ndf*2, [4, 4], 2, 'SAME', None, 1, lrelu],
-            [ndf*4, [4, 4], 2, 'SAME', None, 1, lrelu],
-            [ndf*8, [4, 4], 2, 'SAME', None, 1, lrelu],
-            [    1, [4, 4], 2, 'VALID', None, 1, None]
-        ], normalizer_fn=layers.batch_norm)
-        '''
-
         net = layers.conv2d(input_tensor, ndf * 1, [4, 4], 2, 'SAME', activation_fn=lrelu)
         net = layers.conv2d(net, ndf * 2, [4, 4], 2, 'SAME', activation_fn=lrelu, normalizer_fn=layers.batch_norm)
         net = layers.conv2d(net, ndf * 4, [4, 4], 2, 'SAME', activation_fn=lrelu, normalizer_fn=layers.batch_norm)
         net = layers.conv2d(net, ndf * 8, [4, 4], 2, 'SAME', activation_fn=lrelu, normalizer_fn=layers.batch_norm)
         net = layers.conv2d(net, 1, [4, 4], 2, 'VALID', activation_fn=None)
+        '''
+        net = layers.stack(input_tensor, layers.conv2d, [
+            [ndf*1, [4, 4], 2,  'SAME', 'NHWC', 1, lrelu],
+            [ndf*2, [4, 4], 2,  'SAME', 'NHWC', 1, lrelu, layers.batch_norm],
+            [ndf*4, [4, 4], 2,  'SAME', 'NHWC', 1, lrelu, layers.batch_norm],
+            [ndf*8, [4, 4], 2,  'SAME', 'NHWC', 1, lrelu, layers.batch_norm],
+            [    1, [4, 4], 2, 'VALID', 'NHWC', 1, None]
+        ])
 
     return net
 
@@ -105,26 +105,14 @@ def main(_):
     gen_var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='generator')
     dis_var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='discriminator')
 
-    # g_update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, 'generator')
-    # d_update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, 'discriminator')
-
-    # with tf.control_dependencies(g_update_ops):
     g_train_op = tf.train.AdamOptimizer(0.0002, 0.5).minimize(loss, var_list=gen_var, name='g_train')
-
-    # with tf.control_dependencies(d_update_ops):
     d_train_op = tf.train.AdamOptimizer(0.0002, 0.5).minimize(loss, var_list=dis_var, name='d_train')
-
-    # with tf.variable_scope('discriminator/Stack/convolution_5/BatchNorm', reuse=True):
-    #     bn = tf.get_variable('moving_mean')
-    # with tf.variable_scope('', reuse=True):
-    #     bn = tf.get_variable('loss')
 
     # Summaries
     generated_image_summary_op = tf.summary.image('generated_image', to_rgb(g_op))
     real_image_summary_op = tf.summary.image('real_image', to_rgb(real_images))
     g_loss_summary_op = tf.summary.scalar('g_loss', loss)
     d_loss_summary_op = tf.summary.scalar('d_loss', loss)
-    # bn_summary_op = tf.summary.scalar('bn11', bn)
     g_merged_summaries = tf.summary.merge([generated_image_summary_op, g_loss_summary_op])
     d_merged_summaries = tf.summary.merge([real_image_summary_op, d_loss_summary_op])
 
