@@ -104,8 +104,12 @@ def main(_):
             print 'Entering debug mode...'
             sess = tf_debug.LocalCLIDebugWrapperSession(sess)
 
-        tf.global_variables_initializer().run(session=sess)
-        print 'Variables initialized'
+        if FLAGS.restore:
+            print 'Restoring variables from file...'
+            saver.restore(sess, FLAGS.log_dir + "/model.ckpt")
+        else:
+            print 'Initializing variable'
+            tf.global_variables_initializer().run(session=sess)
 
         # Main
         epoch = 0.0
@@ -149,7 +153,7 @@ def main(_):
 
             if global_step/3 % FLAGS.save_interval == 0:
                 print 'Saving model...'
-                saver.save(sess, FLAGS.log_dir + "/model.ckpt")
+                saver.save(sess, FLAGS.log_dir + "/model.ckpt", global_step)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -171,6 +175,9 @@ if __name__ == '__main__':
 
     parser.add_argument("--save_interval", type=int, default=500,
                         help="Save interval")
+
+    parser.add_argument("--restore", type=bool, default=False,
+        help="Is restoring from log file")
 
     FLAGS, unparsed = parser.parse_known_args()
 
